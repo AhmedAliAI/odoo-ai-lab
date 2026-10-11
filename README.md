@@ -1,5 +1,7 @@
 # odoo-ai-lab
 
+![Odoo 18](https://img.shields.io/badge/Odoo-18-714B67?logo=odoo&logoColor=white) ![n8n](https://img.shields.io/badge/n8n-Cloud-EA4B71?logo=n8n&logoColor=white) ![Built with Claude](https://img.shields.io/badge/Built%20with-Claude%20%2B%20MCP-D97757) ![License: MIT](https://img.shields.io/badge/License-MIT-blue)
+
 Business automations that connect **Odoo ERP** to **n8n**. I design each one and AI agents build it: I write the business spec, Claude builds the workflow through the n8n MCP server, and I review and test it against a staging Odoo database before it goes live.
 
 > Background: Odoo functional and technical consultant, now moving into AI engineering.
@@ -38,3 +40,7 @@ Business automations that connect **Odoo ERP** to **n8n**. I design each one and
 - Odoo → AI: an LLM summary of the day's sales, with anomaly flags
 - RAG over Odoo documentation and records
 - Self-hosted n8n on Docker with native Excel charts
+
+## Contact
+
+**Ahmed Ali Saleh**, Odoo Team Leader, Cairo, Egypt. Open to Odoo + AI automation roles and projects.
