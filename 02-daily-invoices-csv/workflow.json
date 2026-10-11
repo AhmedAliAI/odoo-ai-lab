@@ -1,0 +1,209 @@
+{
+  "name": "02 – Daily invoices totals (CSV)",
+  "nodes": [
+    {
+      "id": "67ef7cec-8cca-42f6-870e-60360879e294",
+      "name": "Daily 23:30 Cairo",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 23,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0d8a8760-c2ee-4e98-ab90-24ad180cc336",
+      "name": "Report date",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        272,
+        224
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "date",
+              "name": "report_date",
+              "value": "={{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd') }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ddf747ea-808b-4c6f-a59d-10b853aedd5c",
+      "name": "Get posted customer invoices",
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 2,
+      "position": [
+        496,
+        224
+      ],
+      "parameters": {
+        "resource": "custom",
+        "operation": "getAll",
+        "authentication": "odooApi",
+        "customResource": {
+          "__rl": true,
+          "mode": "id",
+          "value": "account.move"
+        },
+        "returnAll": true,
+        "filters": {
+          "filter": [
+            {
+              "fieldName": "move_type",
+              "operator": "equal",
+              "value": "out_invoice"
+            },
+            {
+              "fieldName": "state",
+              "operator": "equal",
+              "value": "posted"
+            },
+            {
+              "fieldName": "invoice_date",
+              "operator": "equal",
+              "value": "={{ $json.report_date }}"
+            }
+          ]
+        },
+        "options": {
+          "fieldsList": "name,invoice_date,partner_id,amount_untaxed,amount_tax,amount_total,currency_id"
+        }
+      },
+      "credentials": {
+        "odooApi": {
+          "id": "REPLACE_ME",
+          "name": "Odoo account"
+        }
+      }
+    },
+    {
+      "id": "7604431d-bbe3-476e-a63f-8b1e889dc4f3",
+      "name": "Invoice rows + TOTAL row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        224
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const round = (n) => Math.round((Number(n) || 0) * 100) / 100;\nconst rows = $input.all().map((item) => {\n  const inv = item.json;\n  return {\n    invoice_number: inv.name,\n    invoice_date: inv.invoice_date,\n    customer: Array.isArray(inv.partner_id) ? inv.partner_id[1] : '',\n    currency: Array.isArray(inv.currency_id) ? inv.currency_id[1] : '',\n    untaxed: round(inv.amount_untaxed),\n    taxes: round(inv.amount_tax),\n    total: round(inv.amount_total),\n  };\n});\nconst sum = (key) => round(rows.reduce((s, r) => s + r[key], 0));\nrows.push({\n  invoice_number: 'TOTAL (' + rows.length + ' invoices)',\n  invoice_date: $('Report date').first().json.report_date,\n  customer: '',\n  currency: '',\n  untaxed: sum('untaxed'),\n  taxes: sum('taxes'),\n  total: sum('total'),\n});\nreturn rows.map((r) => ({ json: r }));"
+      }
+    },
+    {
+      "id": "05c25ebf-9a7f-4b8c-adb7-f56e9a42fb79",
+      "name": "Create CSV file",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        944,
+        224
+      ],
+      "parameters": {
+        "operation": "csv",
+        "binaryPropertyName": "data",
+        "options": {
+          "fileName": "={{ 'daily_invoices_' + $('Report date').first().json.report_date + '.csv' }}",
+          "headerRow": true,
+          "addBOM": true
+        }
+      }
+    },
+    {
+      "id": "9f88878f-97c6-4fd9-8c46-bb00e7cd94fc",
+      "name": "Run manually (test)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        192
+      ],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Daily 23:30 Cairo": {
+      "main": [
+        [
+          {
+            "node": "Report date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report date": {
+      "main": [
+        [
+          {
+            "node": "Get posted customer invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get posted customer invoices": {
+      "main": [
+        [
+          {
+            "node": "Invoice rows + TOTAL row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invoice rows + TOTAL row": {
+      "main": [
+        [
+          {
+            "node": "Create CSV file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run manually (test)": {
+      "main": [
+        [
+          {
+            "node": "Report date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Cairo"
+  },
+  "meta": {
+    "description": "Daily at 23:30 Cairo: today's posted customer invoices from Odoo staging, one row per invoice (untaxed, taxes, total) plus a TOTAL row, saved as CSV."
+  }
+}

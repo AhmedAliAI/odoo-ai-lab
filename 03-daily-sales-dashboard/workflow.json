@@ -1,0 +1,212 @@
+{
+  "name": "03 – Daily sales dashboard (Excel + email)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 23,
+              "triggerAtMinute": 30
+            }
+          ]
+        }
+      },
+      "id": "8f68f9a7-50cb-468f-ade0-da7e117f680e",
+      "name": "Daily 23:30 Cairo",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "date",
+              "name": "report_date",
+              "value": "={{ $now.setZone('Africa/Cairo').toFormat('yyyy-MM-dd') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "84743ecf-4de6-438d-98e2-89bf8b652b5b",
+      "name": "Report date",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        272,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "odooApi",
+        "resource": "custom",
+        "customResource": {
+          "__rl": true,
+          "mode": "id",
+          "value": "account.move"
+        },
+        "returnAll": true,
+        "options": {
+          "fieldsList": "name,invoice_date,journal_id,partner_id,invoice_user_id,amount_untaxed_signed,amount_tax_signed,amount_total_signed"
+        },
+        "filters": {
+          "filter": [
+            {
+              "fieldName": "move_type",
+              "value": "out_invoice"
+            },
+            {
+              "fieldName": "state",
+              "value": "posted"
+            },
+            {
+              "fieldName": "invoice_date",
+              "value": "={{ $json.report_date }}"
+            }
+          ]
+        }
+      },
+      "id": "c932cd91-03d4-4bfb-8f83-618ebc94d3b3",
+      "name": "Get posted customer invoices",
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 2,
+      "position": [
+        496,
+        224
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "odooApi": {
+          "id": "REPLACE_ME",
+          "name": "Odoo account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== Daily sales report: summary + multi-sheet XLSX (built by hand) + HTML email =====\n// Input: Odoo account.move items (may contain one empty item when there are no invoices)\nconst reportDate = $('Report date').first().json.report_date;\nconst COMPANY_CCY = 'EGP';\nconst r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;\nconst m2o = (v) => (Array.isArray(v) ? v[1] : '');\n\nconst invoices = $input.all()\n  .map((i) => i.json)\n  .filter((inv) => inv && inv.id)\n  .map((inv) => ({\n    invoice_number: inv.name,\n    invoice_date: inv.invoice_date,\n    journal: m2o(inv.journal_id),\n    customer: m2o(inv.partner_id) || '(no customer)',\n    salesperson: m2o(inv.invoice_user_id) || '(no salesperson)',\n    untaxed: r2(inv.amount_untaxed_signed),\n    taxes: r2(inv.amount_tax_signed),\n    total: r2(inv.amount_total_signed),\n  }))\n  .sort((a, b) => b.total - a.total);\n\nconst sum = (rows, k) => r2(rows.reduce((s, r) => s + r[k], 0));\nconst totals = {\n  count: invoices.length,\n  untaxed: sum(invoices, 'untaxed'),\n  taxes: sum(invoices, 'taxes'),\n  total: sum(invoices, 'total'),\n};\ntotals.avg = totals.count ? r2(totals.total / totals.count) : 0;\n\nconst groupBy = (key) => {\n  const m = new Map();\n  for (const inv of invoices) {\n    const g = m.get(inv[key]) || { name: inv[key], invoices: 0, untaxed: 0, taxes: 0, total: 0 };\n    g.invoices += 1; g.untaxed += inv.untaxed; g.taxes += inv.taxes; g.total += inv.total;\n    m.set(inv[key], g);\n  }\n  return [...m.values()]\n    .map((g) => ({ ...g, untaxed: r2(g.untaxed), taxes: r2(g.taxes), total: r2(g.total),\n      share: totals.total ? g.total / totals.total : 0 }))\n    .sort((a, b) => b.total - a.total)\n    .map((g, i) => ({ rank: i + 1, ...g }));\n};\nconst customers = groupBy('customer');\nconst salespeople = groupBy('salesperson');\n\n// ---------- XLSX writer (inline strings, stored ZIP) ----------\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst colName = (n) => { let s = ''; n += 1; while (n) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };\n// styles: 0 normal, 1 header, 2 money, 3 bold money, 4 title, 5 kpi label, 6 kpi money, 7 percent, 8 bold text, 9 subtitle, 10 kpi count\nconst cell = (r, c, v, s = 0) => {\n  const ref = colName(c) + (r + 1);\n  if (v === null || v === undefined || v === '') return s ? `<c r=\"${ref}\" s=\"${s}\"/>` : '';\n  if (typeof v === 'number') return `<c r=\"${ref}\" s=\"${s}\"><v>${v}</v></c>`;\n  return `<c r=\"${ref}\" s=\"${s}\" t=\"inlineStr\"><is><t xml:space=\"preserve\">${esc(v)}</t></is></c>`;\n};\nconst sheetXml = (rows, widths, extra = '', heights = {}) => {\n  const cols = `<cols>${widths.map((w, i) => `<col min=\"${i + 1}\" max=\"${i + 1}\" width=\"${w}\" customWidth=\"1\"/>`).join('')}</cols>`;\n  const body = rows.map((row, r) => {\n    if (!row) return '';\n    const ht = heights[r] ? ` ht=\"${heights[r]}\" customHeight=\"1\"` : '';\n    return `<row r=\"${r + 1}\"${ht}>${row.map((c, ci) => (c ? cell(r, ci, c.v, c.s) : '')).join('')}</row>`;\n  }).join('');\n  return `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetViews><sheetView workbookViewId=\"0\" showGridLines=\"0\"/></sheetViews>${cols}<sheetData>${body}</sheetData>${extra}</worksheet>`;\n};\nconst dataBar = (range, color, prio) => `<conditionalFormatting sqref=\"${range}\"><cfRule type=\"dataBar\" priority=\"${prio}\"><dataBar><cfvo type=\"min\"/><cfvo type=\"max\"/><color rgb=\"${color}\"/></dataBar></cfRule></conditionalFormatting>`;\nconst V = (v, s = 0) => ({ v, s });\n\n// Dashboard sheet\nconst D = [];\nD[0] = [V(`Daily Sales Dashboard — ${reportDate}`, 4)];\nD[1] = [V(`Posted customer invoices · amounts in ${COMPANY_CCY} (company currency)`, 9)];\nD[3] = [V('Invoices', 5), V('Untaxed', 5), V('Taxes', 5), V('Total', 5), V('Average invoice', 5)];\nD[4] = [V(totals.count, 10), V(totals.untaxed, 6), V(totals.taxes, 6), V(totals.total, 6), V(totals.avg, 6)];\nlet r = 6;\nD[r++] = [V('Top 10 customers', 8)];\nD[r++] = [V('Rank', 1), V('Customer', 1), V('Invoices', 1), V('Total', 1), V('Share', 1)];\nconst custStart = r;\nfor (const c of customers.slice(0, 10)) D[r++] = [V(c.rank), V(c.name), V(c.invoices), V(c.total, 2), V(c.share, 7)];\nconst custEnd = r - 1;\nr += 1;\nD[r++] = [V('Top salespersons', 8)];\nD[r++] = [V('Rank', 1), V('Salesperson', 1), V('Invoices', 1), V('Total', 1), V('Share', 1)];\nconst spStart = r;\nfor (const s of salespeople.slice(0, 10)) D[r++] = [V(s.rank), V(s.name), V(s.invoices), V(s.total, 2), V(s.share, 7)];\nconst spEnd = r - 1;\nlet dashExtra = '';\nif (customers.length) dashExtra += dataBar(`D${custStart + 1}:D${custEnd + 1}`, 'FF2E7D6B', 1);\nif (salespeople.length) dashExtra += dataBar(`D${spStart + 1}:D${spEnd + 1}`, 'FF6B4FBF', 2);\nif (!invoices.length) D[6] = [V('No posted customer invoices for this date.', 8)];\nconst dashboard = sheetXml(D, [16, 46, 12, 18, 18], invoices.length ? dashExtra : '', { 0: 30, 4: 26 });\n\n// Invoices sheet\nconst I = [[V('Invoice', 1), V('Date', 1), V('Journal', 1), V('Customer', 1), V('Salesperson', 1), V('Untaxed', 1), V('Taxes', 1), V('Total', 1)]];\nfor (const inv of invoices) I.push([V(inv.invoice_number), V(inv.invoice_date), V(inv.journal), V(inv.customer), V(inv.salesperson), V(inv.untaxed, 2), V(inv.taxes, 2), V(inv.total, 2)]);\nI.push([V(`TOTAL (${totals.count} invoices)`, 8), null, null, null, null, V(totals.untaxed, 3), V(totals.taxes, 3), V(totals.total, 3)]);\nconst invSheet = sheetXml(I, [20, 12, 22, 44, 26, 16, 14, 16]);\n\nconst groupSheet = (rows, label, color) => {\n  const G = [[V('Rank', 1), V(label, 1), V('Invoices', 1), V('Untaxed', 1), V('Taxes', 1), V('Total', 1), V('Share', 1)]];\n  for (const g of rows) G.push([V(g.rank), V(g.name), V(g.invoices), V(g.untaxed, 2), V(g.taxes, 2), V(g.total, 2), V(g.share, 7)]);\n  const extra = rows.length ? dataBar(`F2:F${rows.length + 1}`, color, 1) : '';\n  return sheetXml(G, [8, 46, 10, 16, 14, 16, 10], extra);\n};\nconst sheets = [\n  ['Dashboard', dashboard],\n  ['Invoices', invSheet],\n  ['Customers', groupSheet(customers, 'Customer', 'FF2E7D6B')],\n  ['Salespersons', groupSheet(salespeople, 'Salesperson', 'FF6B4FBF')],\n];\n\nconst styles = `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\n<numFmts count=\"1\"><numFmt numFmtId=\"164\" formatCode=\"#,##0.00\"/></numFmts>\n<fonts count=\"6\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><color rgb=\"FFFFFFFF\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"18\"/><color rgb=\"FF1F3A5F\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"11\"/><name val=\"Calibri\"/></font><font><sz val=\"10\"/><color rgb=\"FF6B7280\"/><name val=\"Calibri\"/></font><font><b/><sz val=\"16\"/><color rgb=\"FF1F3A5F\"/><name val=\"Calibri\"/></font></fonts>\n<fills count=\"4\"><fill><patternFill patternType=\"none\"/></fill><fill><patternFill patternType=\"gray125\"/></fill><fill><patternFill patternType=\"solid\"><fgColor rgb=\"FF1F3A5F\"/></patternFill></fill><fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFEEF2F7\"/></patternFill></fill></fills>\n<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>\n<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>\n<cellXfs count=\"11\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/><xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\"/><xf numFmtId=\"164\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"164\" fontId=\"3\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\"/><xf numFmtId=\"0\" fontId=\"2\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"0\" fontId=\"4\" fillId=\"3\" borderId=\"0\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\"/><xf numFmtId=\"164\" fontId=\"5\" fillId=\"3\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\" applyFill=\"1\"/><xf numFmtId=\"10\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\"/><xf numFmtId=\"0\" fontId=\"3\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"0\" fontId=\"4\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyFont=\"1\"/><xf numFmtId=\"3\" fontId=\"5\" fillId=\"3\" borderId=\"0\" xfId=\"0\" applyNumberFormat=\"1\" applyFont=\"1\" applyFill=\"1\"/></cellXfs><cellStyles count=\"1\"><cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/></cellStyles></styleSheet>`;\n\nconst files = [\n  ['[Content_Types].xml', `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/><Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>${sheets.map((_, i) => `<Override PartName=\"/xl/worksheets/sheet${i + 1}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>`).join('')}</Types>`],\n  ['_rels/.rels', `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>`],\n  ['xl/workbook.xml', `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>${sheets.map(([n], i) => `<sheet name=\"${n}\" sheetId=\"${i + 1}\" r:id=\"rId${i + 1}\"/>`).join('')}</sheets></workbook>`],\n  ['xl/_rels/workbook.xml.rels', `<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">${sheets.map((_, i) => `<Relationship Id=\"rId${i + 1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet${i + 1}.xml\"/>`).join('')}<Relationship Id=\"rId${sheets.length + 1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>`],\n  ['xl/styles.xml', styles],\n  ...sheets.map(([, xml], i) => [`xl/worksheets/sheet${i + 1}.xml`, xml]),\n];\n\nconst crcTable = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();\nconst crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };\nconst zip = (entries) => {\n  const locals = []; const centrals = []; let offset = 0;\n  for (const [name, content] of entries) {\n    const data = Buffer.from(content, 'utf8'); const nameBuf = Buffer.from(name, 'utf8'); const crc = crc32(data);\n    const lh = Buffer.alloc(30);\n    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(0, 8);\n    lh.writeUInt16LE(0, 10); lh.writeUInt16LE(0x21, 12); lh.writeUInt32LE(crc, 14);\n    lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nameBuf.length, 26); lh.writeUInt16LE(0, 28);\n    locals.push(lh, nameBuf, data);\n    const ch = Buffer.alloc(46);\n    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8);\n    ch.writeUInt16LE(0, 10); ch.writeUInt16LE(0, 12); ch.writeUInt16LE(0x21, 14); ch.writeUInt32LE(crc, 16);\n    ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(nameBuf.length, 28);\n    ch.writeUInt16LE(0, 30); ch.writeUInt16LE(0, 32); ch.writeUInt16LE(0, 34); ch.writeUInt16LE(0, 36); ch.writeUInt32LE(0, 38); ch.writeUInt32LE(offset, 42);\n    centrals.push(ch, nameBuf);\n    offset += 30 + nameBuf.length + data.length;\n  }\n  const cd = Buffer.concat(centrals);\n  const end = Buffer.alloc(22);\n  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0, 4); end.writeUInt16LE(0, 6);\n  end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16); end.writeUInt16LE(0, 20);\n  return Buffer.concat([...locals, cd, end]);\n};\nconst xlsxBuffer = zip(files);\nconst fileName = `daily_sales_${reportDate}.xlsx`;\n\n// ---------- HTML email dashboard ----------\nconst fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\nconst pct = (x) => (x * 100).toFixed(1) + '%';\nconst kpi = (label, value) => `<td style=\"padding:12px 14px;background:#EEF2F7;border-radius:8px;\"><div style=\"font-size:12px;color:#6B7280;\">${label}</div><div style=\"font-size:20px;font-weight:bold;color:#1F3A5F;\">${value}</div></td>`;\nconst barTable = (title, rows, color) => {\n  if (!rows.length) return '';\n  const max = rows[0].total || 1;\n  const trs = rows.slice(0, 5).map((g) => `<tr><td style=\"padding:6px 8px;color:#6B7280;width:24px;\">${g.rank}</td><td style=\"padding:6px 8px;\" dir=\"auto\">${esc(g.name)}<div style=\"height:8px;background:#E5E7EB;border-radius:4px;margin-top:4px;\"><div style=\"height:8px;width:${Math.max(2, Math.round((g.total / max) * 100))}%;background:${color};border-radius:4px;\"></div></div></td><td style=\"padding:6px 8px;text-align:right;white-space:nowrap;\">${fmt(g.total)}</td><td style=\"padding:6px 8px;text-align:right;color:#6B7280;\">${pct(g.share)}</td></tr>`).join('');\n  return `<h3 style=\"color:#1F3A5F;margin:24px 0 8px;\">${title}</h3><table style=\"width:100%;border-collapse:collapse;font-size:14px;\">${trs}</table>`;\n};\nconst html = invoices.length\n  ? `<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:640px;color:#111827;\">\n<h2 style=\"color:#1F3A5F;margin:0 0 4px;\">Daily Sales Dashboard — ${reportDate}</h2>\n<div style=\"color:#6B7280;font-size:13px;margin-bottom:16px;\">Posted customer invoices · ${COMPANY_CCY}</div>\n<table style=\"border-collapse:separate;border-spacing:8px;width:100%;\"><tr>${kpi('Invoices', totals.count)}${kpi('Untaxed', fmt(totals.untaxed))}</tr><tr>${kpi('Taxes', fmt(totals.taxes))}${kpi('Total', fmt(totals.total))}</tr></table>\n${barTable('Top customers', customers, '#2E7D6B')}\n${barTable('Top salespersons', salespeople, '#6B4FBF')}\n<p style=\"color:#6B7280;font-size:12px;margin-top:24px;\">Full details in the attached Excel: Dashboard, Invoices, Customers and Salespersons sheets.</p></div>`\n  : `<div style=\"font-family:Arial,Helvetica,sans-serif;\"><h2 style=\"color:#1F3A5F;\">Daily Sales Dashboard — ${reportDate}</h2><p>No posted customer invoices for this date.</p></div>`;\n\nconst binary = { data: await this.helpers.prepareBinaryData(xlsxBuffer, fileName, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') };\nreturn [{\n  json: {\n    report_date: reportDate,\n    subject: `Daily sales ${reportDate}: ${totals.count} invoices · ${fmt(totals.total)} ${COMPANY_CCY}`,\n    html,\n    invoices: totals.count, untaxed: totals.untaxed, taxes: totals.taxes, total: totals.total,\n    top_customer: customers[0]?.name || '', top_salesperson: salespeople[0]?.name || '',\n  },\n  binary,\n}];\n"
+      },
+      "id": "ff163433-57cf-4154-8816-0fc8c634762d",
+      "name": "Build Excel dashboard + email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "you@example.com",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false,
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {}
+            ]
+          }
+        }
+      },
+      "id": "3bf4ff49-39f2-4ab0-8686-dc507bcf8ac1",
+      "name": "Email report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        1024,
+        224
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_ME",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "666af832-6613-444e-87c3-3bf63ea7fad3",
+      "name": "Run manually (test)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        192
+      ]
+    }
+  ],
+  "connections": {
+    "Daily 23:30 Cairo": {
+      "main": [
+        [
+          {
+            "node": "Report date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report date": {
+      "main": [
+        [
+          {
+            "node": "Get posted customer invoices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get posted customer invoices": {
+      "main": [
+        [
+          {
+            "node": "Build Excel dashboard + email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Excel dashboard + email": {
+      "main": [
+        [
+          {
+            "node": "Email report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run manually (test)": {
+      "main": [
+        [
+          {
+            "node": "Report date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Africa/Cairo",
+    "binaryMode": "separate"
+  },
+  "meta": {
+    "description": "Daily 23:30 Cairo: posted customer invoices from Odoo staging → 4-sheet Excel (Dashboard, Invoices, Customers, Salespersons) + HTML dashboard email to your inbox."
+  }
+}

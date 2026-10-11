@@ -1,0 +1,166 @@
+{
+  "name": "01 – Contacts missing email",
+  "nodes": [
+    {
+      "id": "c1855456-5b31-4cb6-b323-37716dc6216d",
+      "name": "Run manually",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "48fe01d5-47fa-4d9b-ae20-31b5942b6574",
+      "name": "Get Odoo contacts with no email",
+      "type": "n8n-nodes-base.odoo",
+      "typeVersion": 2,
+      "position": [
+        272,
+        128
+      ],
+      "parameters": {
+        "authentication": "odooApi",
+        "filters": {
+          "filter": [
+            {
+              "fieldName": "email",
+              "operator": "equal",
+              "value": "={{ false }}"
+            }
+          ]
+        },
+        "limit": 500,
+        "operation": "getAll",
+        "options": {
+          "fieldsList": [
+            "name",
+            "email",
+            "phone",
+            "city"
+          ]
+        },
+        "resource": "contact",
+        "returnAll": false
+      },
+      "credentials": {
+        "odooApi": {
+          "id": "REPLACE_ME",
+          "name": "Odoo account"
+        }
+      }
+    },
+    {
+      "id": "5a04e4b3-cd0c-4ee3-bf51-1f9d438ba158",
+      "name": "Keep contacts with no email",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        496,
+        128
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "no-email",
+              "leftValue": "={{ !$json.email || String($json.email).trim() === \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "94572f04-6ae2-47d6-baff-39ce7945ee3d",
+      "name": "Report columns",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        720,
+        128
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "name",
+              "name": "name",
+              "value": "={{ $json.name || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "phone",
+              "name": "phone",
+              "value": "={{ $json.phone || \"\" }}",
+              "type": "string"
+            },
+            {
+              "id": "city",
+              "name": "city",
+              "value": "={{ $json.city || \"\" }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Run manually": {
+      "main": [
+        [
+          {
+            "node": "Get Odoo contacts with no email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep contacts with no email": {
+      "main": [
+        [
+          {
+            "node": "Report columns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Odoo contacts with no email": {
+      "main": [
+        [
+          {
+            "node": "Keep contacts with no email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Lists Odoo (staging) contacts with no email: name, phone, city. Read-only. Built from Ahmed's spec in architect mode."
+  }
+}
